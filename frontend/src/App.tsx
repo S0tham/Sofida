@@ -1,112 +1,81 @@
-// src/App.tsx
+import { useState, useEffect, useRef } from 'react';
+import * as api from './api';
+import ExerciseRenderer from './components/ExerciseRenderer';
 
-import React, { useEffect, useState } from "react";
-import {
-  createSession,
-  sendChat,
-  createExercise,
-  submitAnswer,
-} from "./api";
-
-interface TutorState {
-  name: string;
-}
-
-interface WordLimit {
-  min: number;
-  max: number;
-}
-
-interface ExerciseContent {
-  question?: string;
-  options?: string[];
-  sentence?: string;
-  passage?: string;
-  prompt?: string;
-  rubric?: Record<string, string>;
-  word_limit?: WordLimit;
-  wordLimit?: WordLimit; // fallback
-}
-
-interface Exercise {
-  exercise_id: string;
-  type: string;
-  topic: string;
-  difficulty: string;
-  instructions: string;
-  content: ExerciseContent;
-}
-
-interface Feedback {
-  tutor_name: string;
-  feedback_text: string;
-}
-
-interface ChatTurn {
-  role: "user" | "tutor";
+// Types voor de chatberichten
+interface Message {
+  role: string;
   text: string;
 }
 
-interface SessionState {
-  tutor: TutorState;
-  config: any;
-  chat_history: ChatTurn[];
-  current_exercise: Exercise | null;
-  current_exercise_id: string | null;
-  current_feedback: Feedback | null;
-}
-
-const App: React.FC = () => {
+export default function App() {
+  // --- STATE ---
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [state, setState] = useState<SessionState | null>(null);
+  const [tutorName, setTutorName] = useState("AI Tutor");
+  
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [currentExercise, setCurrentExercise] = useState<any>(null);
+  
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const [tutorChoice, setTutorChoice] = useState<"jan" | "sara">("jan");
-  const [topic, setTopic] = useState("Present Perfect");
-  const [theme, setTheme] = useState("school");
-  const [skill, setSkill] = useState("grammar");
-  const [difficulty, setDifficulty] = useState("medium");
+  // Auto-scroll referentie
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const [chatInput, setChatInput] = useState("");
-  const [answerInput, setAnswerInput] = useState("");
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
 
-  const bootSession = async () => {
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, currentExercise, loading]);
+
+
+  // --- ACTIES ---
+
+  const handleStartSession = async (tutor: string) => {
     try {
       setLoading(true);
-      const config = { topic, theme, skill, difficulty };
-      const data = await createSession(tutorChoice, config);
+      // Hier kun je later inputs voor maken als je wilt (bijv. difficulty slider)
+      const config = { topic: "General", difficulty: "medium", skill: "grammar" };
+      
+      const data = await api.createSession(tutor, config);
+      
       setSessionId(data.session_id);
-      setState(data.state as SessionState);
-      setAnswerInput("");
-      setChatInput("");
-    } catch (err) {
-      console.error(err);
-      alert("Kon geen sessie aanmaken. Check of backend draait.");
+      setTutorName(data.state.tutor.name);
+      setMessages(data.state.chat_history || []);
+      
+      // Als er nog geen chatgeschiedenis is, stuur zelf een "Start" trigger
+      if (!data.state.chat_history || data.state.chat_history.length === 0) {
+        // We sturen een onzichtbaar bericht of triggeren een begroeting in de UI
+        // Voor nu laten we de gebruiker het gesprek beginnen of wachten op de tutor
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Kan geen verbinding maken met de backend. Draait 'main.py'?");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    // init
-    void bootSession();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const handleSendMessage = async (text: string = input) => {
+    if (!text.trim() || !sessionId) return;
+    
+    // Optimistic UI: toon bericht meteen
+    const newMsg = { role: 'user', text };
+    const prevMessages = [...messages];
+    setMessages([...prevMessages, newMsg]);
+    setInput("");
+    setLoading(true);
 
-  const handleResetSession = async () => {
-    await bootSession();
-  };
-
-  const handleSendChat = async () => {
-    if (!chatInput.trim() || !sessionId) return;
     try {
-      setLoading(true);
-      const res = await sendChat(sessionId, chatInput.trim());
-      setState(res.state as SessionState);
-      setChatInput("");
-    } catch (err) {
-      console.error(err);
-      alert("Fout bij verzenden chatbericht.");
+      const data = await api.sendMessage(sessionId, text);
+      setMessages(data.state.chat_history);
+    } catch (e) {
+      console.error(e);
+      // Terugdraaien bij fout
+      setMessages(prevMessages);
+      alert("Er ging iets mis bij het versturen.");
     } finally {
       setLoading(false);
     }
@@ -114,499 +83,200 @@ const App: React.FC = () => {
 
   const handleNewExercise = async () => {
     if (!sessionId) return;
+    setLoading(true);
     try {
-      setLoading(true);
-      const res = await createExercise(sessionId);
-      setState(res.state as SessionState);
-      setAnswerInput("");
-    } catch (err) {
-      console.error(err);
-      alert("Fout bij genereren oefening.");
+      const data = await api.requestExercise(sessionId);
+      setMessages(data.state.chat_history);
+      setCurrentExercise(data.exercise);
+    } catch (e) {
+      console.error(e);
+      alert("Kon geen oefening laden.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSubmitAnswer = async () => {
-    if (!sessionId || !answerInput.trim()) return;
+  const handleSubmitAnswer = async (answer: string) => {
+    if (!sessionId) return;
+    setLoading(true);
     try {
-      setLoading(true);
-      const res = await submitAnswer(sessionId, answerInput.trim());
-      setState(res.state as SessionState);
-    } catch (err: any) {
-      console.error(err);
-      alert(err.message || "Fout bij nakijken van antwoord.");
+      const data = await api.submitAnswer(sessionId, answer);
+      setMessages(data.state.chat_history);
+      setCurrentExercise(null); // Oefening is klaar
+    } catch (e) {
+      console.error(e);
+      alert("Fout bij nakijken.");
     } finally {
       setLoading(false);
     }
   };
 
-  const currentExercise = state?.current_exercise ?? null;
-  const currentFeedback = state?.current_feedback ?? null;
-  const chatHistory = state?.chat_history ?? [];
-  const tutorName = state?.tutor?.name ?? "Tutor";
 
-  // fallback voor word_limit naming
-  const wl =
-    currentExercise?.content.word_limit || currentExercise?.content.wordLimit;
+  // --- SCHERM 1: KEUZEMENU ---
+  if (!sessionId) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-blue-100 flex items-center justify-center p-4">
+        <div className="bg-white max-w-2xl w-full rounded-2xl shadow-xl overflow-hidden flex flex-col md:flex-row">
+          
+          <div className="p-8 md:w-1/2 flex flex-col justify-center border-r border-gray-100">
+            <h1 className="text-3xl font-extrabold text-gray-800 mb-2">Engels Tutor</h1>
+            <p className="text-gray-500 mb-8">Kies je persoonlijke coach om te beginnen met oefenen.</p>
+            
+            <button 
+              onClick={() => handleStartSession("jan")}
+              className="group relative w-full mb-4 p-4 rounded-xl border-2 border-blue-100 hover:border-blue-500 hover:bg-blue-50 transition-all text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold">J</div>
+                <div>
+                  <h3 className="font-bold text-gray-800 group-hover:text-blue-700">Meester Jan</h3>
+                  <p className="text-xs text-gray-500">Geduldig & Bemoedigend</p>
+                </div>
+              </div>
+            </button>
 
+            <button 
+              onClick={() => handleStartSession("sara")}
+              className="group relative w-full p-4 rounded-xl border-2 border-purple-100 hover:border-purple-500 hover:bg-purple-50 transition-all text-left"
+            >
+               <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center text-purple-600 font-bold">S</div>
+                <div>
+                  <h3 className="font-bold text-gray-800 group-hover:text-purple-700">Coach Sara</h3>
+                  <p className="text-xs text-gray-500">Direct & Resultaatgericht</p>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div className="bg-blue-600 p-8 md:w-1/2 flex flex-col justify-center text-white">
+            <h2 className="text-2xl font-bold mb-4">Klaar voor je examen?</h2>
+            <ul className="space-y-3 text-blue-100 text-sm">
+              <li className="flex gap-2">✓ Oefen grammatica (Present Perfect, Conditionals)</li>
+              <li className="flex gap-2">✓ Train leesvaardigheid</li>
+              <li className="flex gap-2">✓ Krijg feedback op je schrijfopdrachten</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- SCHERM 2: DE CHAT ---
   return (
-    <div style={styles.app}>
-      <header style={styles.header}>
-        <h1>AI Tutor (HAVO 5 Engels)</h1>
-        <button
-          onClick={handleResetSession}
-          disabled={loading}
-          style={styles.smallButton}
-        >
-          Nieuwe sessie
-        </button>
+    <div className="flex flex-col h-screen bg-gray-50 font-sans">
+      
+      {/* HEADER */}
+      <header className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center shadow-sm z-10">
+        <div className="flex items-center gap-3">
+           <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${tutorName.includes("Jan") ? "bg-blue-500" : "bg-purple-600"}`}>
+             {tutorName[0]}
+           </div>
+           <div>
+             <h1 className="font-bold text-gray-800">{tutorName}</h1>
+             <p className="text-xs text-green-600 flex items-center gap-1">
+               <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Online
+             </p>
+           </div>
+        </div>
+        
+        <div className="flex gap-2">
+            <button 
+              onClick={handleNewExercise}
+              disabled={loading || currentExercise !== null}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              + Nieuwe Oefening
+            </button>
+            <button 
+              onClick={() => setSessionId(null)}
+              className="text-gray-400 hover:text-red-500 p-2"
+              title="Afsluiten"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+              </svg>
+            </button>
+        </div>
       </header>
 
-      <section style={styles.configBar}>
-        <div>
-          <label style={styles.label}>Tutor:</label>
-          <select
-            value={tutorChoice}
-            onChange={(e) =>
-              setTutorChoice(e.target.value === "sara" ? "sara" : "jan")
-            }
-            style={styles.select}
-          >
-            <option value="jan">Meester Jan</option>
-            <option value="sara">Coach Sara</option>
-          </select>
-        </div>
-        <div>
-          <label style={styles.label}>Topic:</label>
-          <input
-            style={styles.input}
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-          />
-        </div>
-        <div>
-          <label style={styles.label}>Thema:</label>
-          <input
-            style={styles.input}
-            value={theme}
-            onChange={(e) => setTheme(e.target.value)}
-          />
-        </div>
-        <div>
-          <label style={styles.label}>Skill:</label>
-          <select
-            style={styles.select}
-            value={skill}
-            onChange={(e) => setSkill(e.target.value)}
-          >
-            <option value="grammar">Grammar</option>
-            <option value="reading">Reading</option>
-            <option value="writing">Writing</option>
-          </select>
-        </div>
-        <div>
-          <label style={styles.label}>Difficulty:</label>
-          <select
-            style={styles.select}
-            value={difficulty}
-            onChange={(e) => setDifficulty(e.target.value)}
-          >
-            <option value="easy">Easy</option>
-            <option value="medium">Medium</option>
-            <option value="hard">Hard</option>
-          </select>
-        </div>
-        <button
-          onClick={bootSession}
-          disabled={loading}
-          style={styles.button}
-          title="Nieuwe sessie met deze instellingen"
-        >
-          Start met deze instellingen
-        </button>
-      </section>
+      {/* CHAT AREA */}
+      <main className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+        {messages.map((msg, idx) => {
+          const isUser = msg.role === 'user';
+          return (
+            <div key={idx} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+              <div className={`flex max-w-[85%] md:max-w-[70%] ${isUser ? 'flex-row-reverse' : 'flex-row'} gap-3`}>
+                
+                {/* Avatar naast bericht */}
+                <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold ${isUser ? 'bg-gray-200 text-gray-600' : (tutorName.includes("Jan") ? 'bg-blue-100 text-blue-600' : 'bg-purple-100 text-purple-600')}`}>
+                   {isUser ? 'Jij' : tutorName[0]}
+                </div>
 
-      <main style={styles.main}>
-        {/* Chat */}
-        <div style={styles.chatPanel}>
-          <h2>Chat met {tutorName}</h2>
-          <div style={styles.chatBox}>
-            {chatHistory.map((turn, idx) => (
-              <div
-                key={idx}
-                style={{
-                  ...styles.chatBubble,
-                  alignSelf: turn.role === "user" ? "flex-end" : "flex-start",
-                  backgroundColor:
-                    turn.role === "user" ? "#e0f7fa" : "#f1f8e9",
-                }}
-              >
-                <strong>{turn.role === "user" ? "Jij" : tutorName}:</strong>{" "}
-                <span>{turn.text}</span>
+                <div 
+                  className={`px-5 py-3.5 rounded-2xl shadow-sm text-[15px] leading-relaxed whitespace-pre-wrap ${
+                    isUser 
+                      ? 'bg-blue-600 text-white rounded-tr-none' 
+                      : 'bg-white text-gray-800 border border-gray-200 rounded-tl-none'
+                  }`}
+                >
+                  {msg.text}
+                </div>
               </div>
-            ))}
-            {chatHistory.length === 0 && (
-              <div style={{ color: "#888", fontSize: 14 }}>
-                Nog geen berichten. Stel een vraag aan de tutor!
-              </div>
-            )}
-          </div>
-          <div style={styles.chatInputRow}>
-            <input
-              style={styles.chatInput}
-              placeholder="Typ je bericht aan de tutor..."
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSendChat()}
-            />
-            <button
-              onClick={handleSendChat}
-              disabled={loading || !chatInput.trim()}
-              style={styles.button}
-            >
-              Verstuur
-            </button>
-          </div>
-        </div>
+            </div>
+          );
+        })}
 
-        {/* Oefenpaneel */}
-        <div style={styles.exercisePanel}>
-          <div style={styles.exerciseHeader}>
-            <h2>Oefenpaneel</h2>
-            <button
-              onClick={handleNewExercise}
-              disabled={loading}
-              style={styles.button}
-            >
-              Nieuwe oefening
-            </button>
-          </div>
-
-          <div style={styles.exerciseBox}>
-            {!currentExercise && (
-              <div style={{ color: "#888", fontSize: 14 }}>
-                Nog geen oefening. Klik op <b>Nieuwe oefening</b> om te
-                beginnen.
-              </div>
-            )}
-
-            {currentExercise && (
-              <>
-                <p>
-                  <strong>Exercise ID:</strong> {currentExercise.exercise_id}
-                </p>
-                <p>
-                  <strong>Type:</strong> {currentExercise.type}{" "}
-                  <strong>Topic:</strong> {currentExercise.topic}{" "}
-                  <strong>Difficulty:</strong> {currentExercise.difficulty}
-                </p>
-                <p>
-                  <strong>Instructie:</strong> {currentExercise.instructions}
-                </p>
-
-                {currentExercise.type === "mcq" && (
-                  <>
-                    <p>
-                      <strong>Vraag:</strong>{" "}
-                      {currentExercise.content.question}
-                    </p>
-                    <ul>
-                      {(currentExercise.content.options || []).map(
-                        (opt, i) => (
-                          <li key={i}>
-                            ({i}) {opt}
-                          </li>
-                        )
-                      )}
-                    </ul>
-                  </>
-                )}
-
-                {currentExercise.type === "gapfill" && (
-                  <p>
-                    <strong>Zin:</strong> {currentExercise.content.sentence}
-                  </p>
-                )}
-
-                {currentExercise.type === "reading" && (
-                  <>
-                    <p>
-                      <strong>Tekst:</strong>{" "}
-                      {currentExercise.content.passage &&
-                      currentExercise.content.passage.length > 400
-                        ? currentExercise.content.passage.slice(0, 400) + "..."
-                        : currentExercise.content.passage}
-                    </p>
-                    <p>
-                      <strong>Vraag:</strong>{" "}
-                      {currentExercise.content.question}
-                    </p>
-                    <ul>
-                      {(currentExercise.content.options || []).map(
-                        (opt, i) => (
-                          <li key={i}>
-                            ({i}) {opt}
-                          </li>
-                        )
-                      )}
-                    </ul>
-                  </>
-                )}
-
-                {currentExercise.type === "writing" && (
-                  <>
-                    <p>
-                      <strong>Schrijfopdracht:</strong>{" "}
-                      {currentExercise.content.prompt}
-                    </p>
-                    {wl && (
-                      <p>
-                        <strong>Woordenlimiet:</strong> {wl.min} – {wl.max}{" "}
-                        woorden
-                      </p>
-                    )}
-                    <p>
-                      <strong>Rubric:</strong>
-                    </p>
-                    <ul>
-                      {currentExercise.content.rubric &&
-                        Object.entries(currentExercise.content.rubric).map(
-                          ([k, v]) => (
-                            <li key={k}>
-                              <strong>{k}:</strong> {v}
-                            </li>
-                          )
-                        )}
-                    </ul>
-                  </>
-                )}
-              </>
-            )}
-          </div>
-
-          <div style={styles.answerBox}>
-            <h3>Jouw antwoord</h3>
-            {currentExercise && currentExercise.type === "writing" ? (
-              <textarea
-                style={styles.textarea}
-                rows={5}
-                placeholder="Typ hier je tekst..."
-                value={answerInput}
-                onChange={(e) => setAnswerInput(e.target.value)}
+        {/* ACTIEVE OEFENING COMPONENT */}
+        {currentExercise && (
+           <div className="max-w-3xl mx-auto animate-fade-in-up">
+              <ExerciseRenderer 
+                exercise={currentExercise} 
+                onSubmit={handleSubmitAnswer} 
+                isLoading={loading}
               />
-            ) : (
-              <input
-                style={styles.inputFull}
-                placeholder="Typ je antwoord (nummer, woord of korte zin)..."
-                value={answerInput}
-                onChange={(e) => setAnswerInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSubmitAnswer()}
-              />
-            )}
-            <button
-              onClick={handleSubmitAnswer}
-              disabled={loading || !currentExercise || !answerInput.trim()}
-              style={styles.button}
-            >
-              Nakijken
-            </button>
-          </div>
+           </div>
+        )}
 
-          <div style={styles.feedbackBox}>
-            <h3>Feedback</h3>
-            {!currentFeedback && (
-              <div style={{ color: "#888", fontSize: 14 }}>
-                Nog geen feedback. Maak eerst een oefening en lever een antwoord
-                in.
-              </div>
-            )}
-            {currentFeedback && (
-              <p>
-                <strong>{currentFeedback.tutor_name}:</strong>{" "}
-                {currentFeedback.feedback_text}
-              </p>
-            )}
+        {/* LOADING INDICATOR */}
+        {loading && (
+          <div className="flex justify-start pl-12">
+            <div className="bg-gray-100 px-4 py-2 rounded-full text-xs text-gray-500 animate-pulse flex items-center gap-2">
+               <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>
+               <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce delay-100"></span>
+               <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce delay-200"></span>
+            </div>
           </div>
-        </div>
+        )}
+
+        <div ref={messagesEndRef} />
       </main>
 
-      {loading && (
-        <div style={styles.loadingOverlay}>
-          <div style={styles.loadingBox}>Bezig met model / server...</div>
+      {/* INPUT AREA */}
+      <footer className="bg-white p-4 border-t border-gray-200">
+        <div className="max-w-4xl mx-auto relative flex gap-3 items-center">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+              placeholder={currentExercise ? "Maak de oefening hierboven..." : "Typ een bericht..."}
+              disabled={loading || currentExercise !== null} 
+              className="flex-1 bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-full focus:ring-blue-500 focus:border-blue-500 block w-full p-4 disabled:bg-gray-100 disabled:cursor-not-allowed transition-all"
+            />
+            <button 
+              onClick={() => handleSendMessage()}
+              disabled={loading || !input.trim() || currentExercise !== null}
+              className="bg-blue-600 hover:bg-blue-700 text-white rounded-full p-3.5 shadow-md disabled:opacity-50 disabled:shadow-none transition-all hover:scale-105 active:scale-95"
+            >
+              <svg className="w-5 h-5 rotate-90" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
+            </button>
         </div>
-      )}
+        <p className="text-center text-xs text-gray-400 mt-2">
+          {currentExercise ? "Tip: Gebruik de knoppen in de oefening hierboven." : "AI kan fouten maken."}
+        </p>
+      </footer>
+
     </div>
   );
-};
-
-// dezelfde styles als eerder
-const styles: Record<string, React.CSSProperties> = {
-  app: {
-    fontFamily: "system-ui, sans-serif",
-    minHeight: "100vh",
-    background: "#f5f5f5",
-    display: "flex",
-    flexDirection: "column",
-  },
-  header: {
-    padding: "10px 20px",
-    background: "#0d47a1",
-    color: "white",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  configBar: {
-    padding: "10px 20px",
-    background: "#e3f2fd",
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap",
-    alignItems: "center",
-  },
-  label: {
-    marginRight: 4,
-    fontSize: 12,
-    textTransform: "uppercase",
-  },
-  select: {
-    padding: "4px 6px",
-    fontSize: 14,
-  },
-  input: {
-    padding: "4px 6px",
-    fontSize: 14,
-    minWidth: 120,
-  },
-  button: {
-    padding: "6px 10px",
-    background: "#1976d2",
-    color: "white",
-    border: "none",
-    borderRadius: 4,
-    cursor: "pointer",
-    fontSize: 14,
-  },
-  smallButton: {
-    padding: "4px 8px",
-    background: "#1565c0",
-    color: "white",
-    border: "none",
-    borderRadius: 4,
-    cursor: "pointer",
-    fontSize: 12,
-  },
-  main: {
-    flex: 1,
-    display: "flex",
-    padding: "10px 20px 20px",
-    gap: "10px",
-  },
-  chatPanel: {
-    flex: 1,
-    display: "flex",
-    flexDirection: "column",
-    background: "white",
-    borderRadius: 8,
-    padding: 10,
-    boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-    minWidth: 0,
-  },
-  chatBox: {
-    flex: 1,
-    border: "1px solid #ddd",
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 8,
-    overflowY: "auto",
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-    background: "#fafafa",
-  },
-  chatBubble: {
-    maxWidth: "85%",
-    padding: "6px 8px",
-    borderRadius: 6,
-    fontSize: 14,
-  },
-  chatInputRow: {
-    display: "flex",
-    gap: 8,
-  },
-  chatInput: {
-    flex: 1,
-    padding: "6px 8px",
-    fontSize: 14,
-  },
-  exercisePanel: {
-    flex: 1,
-    display: "flex",
-    flexDirection: "column",
-    background: "white",
-    borderRadius: 8,
-    padding: 10,
-    boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-    minWidth: 0,
-  },
-  exerciseHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  exerciseBox: {
-    border: "1px solid #ddd",
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 8,
-    background: "#fafafa",
-    fontSize: 14,
-    maxHeight: 260,
-    overflowY: "auto",
-  },
-  answerBox: {
-    border: "1px solid #ddd",
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 8,
-    background: "#fff",
-  },
-  feedbackBox: {
-    border: "1px solid #ddd",
-    borderRadius: 6,
-    padding: 8,
-    background: "#f9fbe7",
-    minHeight: 80,
-  },
-  inputFull: {
-    width: "100%",
-    padding: "6px 8px",
-    fontSize: 14,
-    marginBottom: 6,
-  },
-  textarea: {
-    width: "100%",
-    padding: "6px 8px",
-    fontSize: 14,
-    marginBottom: 6,
-  },
-  loadingOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(255,255,255,0.5)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  loadingBox: {
-    background: "white",
-    padding: "10px 16px",
-    borderRadius: 6,
-    boxShadow: "0 1px 4px rgba(0,0,0,0.2)",
-    fontSize: 14,
-  },
-};
-
-export default App;
+}
