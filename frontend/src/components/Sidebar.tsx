@@ -1,7 +1,6 @@
 import { Home, BookOpen, Calendar, TrendingUp, User, Search, HelpCircle } from 'lucide-react';
 import type { AccentColor, SidebarTheme } from '../App';
-import logoImage from 'figma:asset/66506bafc63d8c93228a09451b0a3ec7e52be2cf.png';
-
+import logoImage from '../assets/logo.png';
 type Props = {
   activeView: 'home' | 'vakken' | 'agenda' | 'progressie' | 'profiel' | 'zoeken' | 'help';
   onNavigate: (view: 'home' | 'vakken' | 'agenda' | 'progressie' | 'profiel' | 'zoeken' | 'help') => void;
