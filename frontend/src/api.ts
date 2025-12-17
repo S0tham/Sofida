@@ -8,9 +8,12 @@ export interface Exercise {
 }
 
 export async function createSession(config: SessionConfig) {
-  const response = await fetch(`${API_URL}/start_session`, {
+  // Let op: Hier MOET /start_session staan!
+  const response = await fetch(`${API_URL}/start_session`, { 
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config),
   });
+
+  // DEZE REGELS MISTEN BIJ JOU:
   if (!response.ok) throw new Error("Start session failed");
   return response.json();
 }
@@ -48,16 +51,21 @@ export async function speakText(text: string, tutorId: string) {
   return response.blob();
 }
 
-// NIEUW: We gebruiken nu Scribe via de backend
+// BELANGRIJK: Deze functie moet precies zo zijn!
 export async function transcribeAudio(audioBlob: Blob) {
   const formData = new FormData();
-  formData.append("file", audioBlob, "recording.mp3"); // Scribe accepteert mp3/wav/etc
+  formData.append("file", audioBlob, "recording.mp3");
 
+  // Let op: Hier moet /transcribe staan, NIET /api/session
   const response = await fetch(`${API_URL}/transcribe`, {
     method: "POST",
     body: formData, 
   });
 
-  if (!response.ok) throw new Error("Transcriptie met Scribe mislukt");
+  if (!response.ok) {
+      const err = await response.text();
+      console.error("Transcribe fout van server:", err);
+      throw new Error("Transcriptie mislukt");
+  }
   return response.json(); 
 }
