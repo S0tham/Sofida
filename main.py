@@ -1,6 +1,8 @@
 import os
 import uvicorn
 import json
+import uuid
+import re 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +20,6 @@ if not api_key: api_key = "ontbrekend"
 
 app = FastAPI()
 
-# CORS - "Alles mag" (voor ontwikkeling)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,7 +28,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Portkey configuratie
 headers = {
     "x-portkey-api-key": api_key,
     "x-portkey-provider": "openai",
@@ -37,70 +37,167 @@ headers = {
 llm = ChatOpenAI(
     api_key="dummy",
     base_url="https://api.portkey.ai/v1",
-    model="gpt-4o", # Zorg dat je een slim model gebruikt voor JSON generatie
+    model="gpt-5.1", 
     default_headers=headers
 )
 
 sessions = {}
 
-# --- DATAMODELLEN ---
 class SessionConfig(BaseModel):
     topic: str
     difficulty: str = "medium"
     skill: str = "general"
-    tutor_id: str = "jan" # Nieuw: we geven hier door wie we willen spreken
+    tutor_id: str = "jan"
 
 class UserMessage(BaseModel):
     text: str
 
+class ThemeUpdate(BaseModel):
+    theme: str
+
 class ExerciseRequest(BaseModel):
-    theme: str # Het thema dat de leerling kiest (bv. "Voetbal")
+    theme: str
+
+# --- HULPFUNCTIES ---
+
+def extract_and_parse_json(text):
+    """Haalt JSON uit tekst, zelfs met markdown eromheen."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except Exception:
+        pass
+    return None
+
+def normalize_exercise_data(data):
+    """
+    FIX: Zorgt dat keys altijd lowercase zijn (Question -> question).
+    Dit voorkomt dat de frontend crasht of niks laat zien.
+    """
+    if not data: return None
+    
+    # Maak alle keys lowercase
+    normalized = {k.lower(): v for k, v in data.items()}
+    
+    # Check of we alles hebben, zo niet, vul aan
+    return {
+        "question": normalized.get("question", "Geen vraag ontvangen"),
+        "options": normalized.get("options", ["Fout bij laden"]),
+        "correct_answer": normalized.get("correct_answer") or normalized.get("answer") or normalized.get("correct") or "",
+        "explanation": normalized.get("explanation", "")
+    }
+
+def create_exercise_json(history, topic, theme):
+    prompt = f"""
+    CONTEXT: De student is bezig met {topic}.
+    THEMA: {theme}
+    TAAK: Genereer 1 multiple choice vraag.
+    
+    BELANGRIJK: Geef ALLEEN de ruwe JSON code terug.
+    
+    JSON FORMAT:
+    {{
+      "question": "De vraagstelling...",
+      "options": ["A) ...", "B) ..."],
+      "correct_answer": "A) ...",
+      "explanation": "..."
+    }}
+    """
+    messages = history[-5:] + [HumanMessage(content=prompt)]
+    
+    try:
+        print(f"🤖 Oefening genereren over: {theme}...")
+        response = llm.invoke(messages)
+        raw_content = response.content
+        
+        data = extract_and_parse_json(raw_content)
+        
+        # HIER REPAREREN WE DE DATA VOORDAT DEZE NAAR FRONTEND GAAT
+        final_data = normalize_exercise_data(data)
+        
+        if not final_data:
+            print(f"❌ JSON PARSE FOUT. Ruwe AI tekst was:\n{raw_content}")
+            raise ValueError("Geen geldige JSON gevonden")
+            
+        print("✅ Oefening succesvol gegenereerd en genormaliseerd!")
+        return final_data
+        
+    except Exception as e:
+        print(f"❌ FATALE FOUT bij genereren: {e}")
+        return None
 
 # --- ENDPOINTS ---
 
 @app.post("/start_session")
 async def start_session(config: SessionConfig):
-    # Definieer de persona's
     personas = {
         "jan": {
             "name": "Meester Jan",
-            "role": "Een geduldige, vriendelijke leraar die veel aanmoedigt.",
-            "style": "Gebruik eenvoudige taal, wees hulpvaardig en geef complimenten."
+            "role": "Geduldig en aanmoedigend.",
+            "style": "Legt rustig uit."
         },
         "sara": {
             "name": "Coach Sara",
-            "role": "Een directe, energieke coach die focust op resultaat.",
-            "style": "Wees kort, krachtig, professioneel en daag de student uit."
+            "role": "Direct en resultaatgericht.",
+            "style": "Daagt uit en houdt tempo."
         }
     }
-    
-    # Kies de tutor op basis van de request, of fallback naar Jan
     tutor = personas.get(config.tutor_id, personas["jan"])
     
     system_prompt = f"""
     Je bent {tutor['name']}. {tutor['role']}
-    Jouw stijl is: {tutor['style']}
-    Het onderwerp is: {config.topic}.
-    Niveau: {config.difficulty}.
-    Reageer altijd in het Nederlands.
+    Vak: {config.topic}.
+    
+    REGEL VOOR OEFENINGEN:
+    Als de leerling om een oefening vraagt, typ NOOIT zelf een vraag.
+    Zeg in plaats daarvan ALLEEN: [GENERATE_EXERCISE]
     """
 
-    import uuid
     session_id = str(uuid.uuid4())
-    
     sessions[session_id] = {
         "history": [SystemMessage(content=system_prompt)],
         "tutor": tutor,
-        "config": config # We bewaren de config voor later
+        "config": config,
+        "active_theme": "Algemeen"
     }
     
     return {
         "session_id": session_id,
         "state": {
             "tutor": tutor,
-            "chat_history": []
+            "chat_history": [],
+            "theme": "Algemeen"
         }
     }
+
+@app.post("/set_theme/{session_id}")
+async def set_theme(session_id: str, update: ThemeUpdate):
+    if session_id not in sessions: raise HTTPException(404, "Sessie niet gevonden")
+    sessions[session_id]["active_theme"] = update.theme
+    return {"status": "ok", "theme": update.theme}
+
+@app.post("/generate_exercise/{session_id}")
+async def generate_exercise_endpoint(session_id: str, req: ExerciseRequest):
+    if session_id not in sessions: raise HTTPException(404, "Sessie niet gevonden")
+    session = sessions[session_id]
+    
+    theme_to_use = req.theme if req.theme else session["active_theme"]
+    
+    exercise_data = create_exercise_json(
+        session["history"], 
+        session["config"].topic, 
+        theme_to_use
+    )
+    
+    if not exercise_data:
+        raise HTTPException(500, "De AI gaf geen geldige oefening terug.")
+        
+    return exercise_data
 
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, message: UserMessage):
@@ -111,7 +208,21 @@ async def chat(session_id: str, message: UserMessage):
     
     try:
         response = llm.invoke(session["history"])
-        session["history"].append(AIMessage(content=response.content))
+        ai_text = response.content
+        
+        exercise_data = None
+        
+        if "[GENERATE_EXERCISE]" in ai_text:
+            ai_text = ai_text.replace("[GENERATE_EXERCISE]", "").strip()
+            if not ai_text: ai_text = "Hier is een oefening voor je!"
+            
+            exercise_data = create_exercise_json(
+                session["history"], 
+                session["config"].topic, 
+                session["active_theme"]
+            )
+        
+        session["history"].append(AIMessage(content=ai_text))
         
         frontend_history = []
         for msg in session["history"]:
@@ -119,52 +230,24 @@ async def chat(session_id: str, message: UserMessage):
                 frontend_history.append({"role": "user", "text": msg.content})
             elif isinstance(msg, AIMessage):
                 frontend_history.append({"role": "tutor", "text": msg.content})
-        
-        return {"state": {"tutor": session["tutor"], "chat_history": frontend_history}}
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
-@app.post("/generate_exercise/{session_id}")
-async def generate_exercise(session_id: str, req: ExerciseRequest):
-    if session_id not in sessions: raise HTTPException(404, "Sessie niet gevonden")
-    session = sessions[session_id]
-    
-    # We vragen de AI om een oefening te maken op basis van de chatgeschiedenis
-    # We voegen een tijdelijke instructie toe (zonder die in de geschiedenis op te slaan)
-    history_context = session["history"][-5:] # Pak de laatste 5 berichten voor context
-    
-    prompt = f"""
-    Kijk naar de bovenstaande conversatie. De student wil oefenen.
-    Onderwerp: {session['config'].topic}.
-    Thema voor de vraag: {req.theme} (Gebruik dit thema in de vraagstelling!).
-    
-    Genereer 1 multiple choice vraag.
-    Geef het antwoord in puur JSON formaat:
-    {{
-      "question": "De vraagstelling...",
-      "options": ["A) optie 1", "B) optie 2", "C) optie 3", "D) optie 4"],
-      "correct_answer": "A) optie 1",
-      "explanation": "Uitleg waarom dit goed is."
-    }}
-    Geef ALLEEN de JSON terug, geen markdown opmaak.
-    """
-    
-    messages = history_context + [HumanMessage(content=prompt)]
-    
-    try:
-        response = llm.invoke(messages)
-        content = response.content.replace("```json", "").replace("```", "").strip()
-        exercise_data = json.loads(content)
-        return exercise_data
-    except Exception as e:
-        print(f"Fout bij genereren: {e}")
-        # Fallback oefening als JSON parsen mislukt
+        if exercise_data:
+            # We sturen de genormaliseerde data
+            frontend_history.append({
+                "role": "exercise", 
+                "exercise": exercise_data
+            })
+        
         return {
-            "question": "Er ging iets mis met genereren. Probeer het nog eens.",
-            "options": ["Probeer opnieuw"],
-            "correct_answer": "Probeer opnieuw",
-            "explanation": "De AI gaf geen geldig JSON formaat."
+            "state": {
+                "tutor": session["tutor"],
+                "chat_history": frontend_history,
+                "theme": session["active_theme"]
+            }
         }
+    except Exception as e:
+        print(f"❌ FOUT: {e}")
+        raise HTTPException(500, str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

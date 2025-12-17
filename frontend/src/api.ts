@@ -4,7 +4,7 @@ export interface SessionConfig {
   topic: string;
   difficulty: string;
   skill: string;
-  tutor_id: "jan" | "sara"; // De keuze zit nu in de config
+  tutor_id: "jan" | "sara";
 }
 
 export interface Exercise {
@@ -14,55 +14,33 @@ export interface Exercise {
   explanation: string;
 }
 
-// FIX: We sturen nu 1 object 'config' mee, en de URL is kaal.
 export async function createSession(config: SessionConfig) {
-  // Let op: GEEN /${tutorId} meer achter de URL!
   const response = await fetch(`${API_URL}/start_session`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("API Error bij createSession:", errorText);
-    throw new Error("Kan geen sessie starten met de backend.");
-  }
-
+  if (!response.ok) throw new Error("Start session failed");
   return response.json();
 }
 
 export async function sendMessage(sessionId: string, text: string) {
   const response = await fetch(`${API_URL}/chat/${sessionId}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
-
-  if (!response.ok) {
-    console.error("API Error bij sendMessage");
-    throw new Error("Kan bericht niet versturen.");
-  }
-
+  if (!response.ok) throw new Error("Send message failed");
   return response.json();
 }
 
-export async function generateExercise(sessionId: string, theme: string): Promise<Exercise> {
-  const response = await fetch(`${API_URL}/generate_exercise/${sessionId}`, {
+// NIEUW: Functie om thema te updaten
+export async function setTheme(sessionId: string, theme: string) {
+  const response = await fetch(`${API_URL}/set_theme/${sessionId}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ theme }),
   });
-
-  if (!response.ok) {
-    throw new Error("Kon geen oefening genereren");
-  }
-  
+  if (!response.ok) throw new Error("Set theme failed");
   return response.json();
 }
