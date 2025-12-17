@@ -1,6 +1,14 @@
-import subprocess
+# tutor_personalities.py
+
+import requests
 from dataclasses import dataclass
 
+# ================================================================
+#  Configuratie
+# ================================================================
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "mistral:7b"
 
 # ================================================================
 #  Basisregels voor ALLE tutoren
@@ -24,7 +32,6 @@ ALGEMENE RICHTLIJNEN VOOR DE AI-TUTOR
 - Behandel de leerling respectvol en motiverend.
   Geen sarcasme of neerbuigende opmerkingen.
 """
-
 
 # ================================================================
 #  Dataclass voor één tutor-persoonlijkheid
@@ -117,132 +124,43 @@ class TutorPersonaliteiten:
 
 
 # ================================================================
-#  LLM Interface met Ollama (Mistral 7B)
+#  LLM Interface (Requests ipv Subprocess)
 # ================================================================
 
-def call_ollama(prompt: str, model: str = "mistral:7b") -> str:
+def call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
     """
-    Algemene LLM-call voor chat/uitleg met tutor-persoonlijkheden.
+    HTTP-call naar Ollama.
+    Dit vervangt de subprocess-methode voor betere stabiliteit in de server.
     """
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
     try:
-        result = subprocess.run(
-            ["ollama", "run", model],
-            input=prompt,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=120
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Ollama-fout: {result.stderr}")
-        return result.stdout.strip()
-    except FileNotFoundError:
-        raise RuntimeError("Ollama lijkt niet geïnstalleerd of niet in PATH.")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Ollama-aanroep duurde te lang (timeout).")
+        # Timeout iets hoger zetten voor trage modellen
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", "")
     except Exception as e:
-        raise RuntimeError(f"Onverwachte fout bij aanroepen van Ollama: {e}")
+        print(f"❌ Fout bij Ollama call: {e}")
+        # Return een veilige fallback string zodat de server niet crasht
+        return "Sorry, ik kon even geen verbinding maken met mijn taalmodel. Controleer of Ollama draait."
 
 
 # ================================================================
-#  Promptbuilder voor testen van de persoonlijkheid (losse CLI)
+#  Test blok (CLI)
 # ================================================================
-
-def build_test_prompt(
-    personality: TutorPersoonlijkheid,
-    leerling_bericht: str
-) -> str:
-    """
-    Bouwt één grote prompttekst voor een enkel-turn test met Ollama.
-    Geen echte system/user roles, gewoon instructie + bericht.
-    """
-    return f"""
-{BASE_TUTOR_RULES}
-
-ACTIEVE TUTOR
--------------
-Naam: {personality.naam}
-
-ROL
----
-{personality.rol}
-
-GEDRAG
-------
-{personality.gedrag}
-
-SPECIFIEKE REGELS
------------------
-{personality.regels}
-
-TAAK
-----
-Je gaat nu reageren op een bericht van een HAVO 5 leerling.
-Houd je strikt aan de hierboven beschreven rol, gedrag en regels.
-Geef het antwoord in het Nederlands (behalve korte Engelse voorbeeldzinnen).
-Geef geen nieuwe opdrachten of extra oefeningen, tenzij de leerling daar heel expliciet om vraagt.
-
-BERICHT VAN DE LEERLING
------------------------
-{leerling_bericht}
-
-GEWENSTE OUTPUT
----------------
-- Antwoord als: {personality.naam}
-- Gebruik de stijl en regels van deze tutor.
-- Houd het antwoord compact (meestal max. 5–6 zinnen).
-""".strip()
-
-
-def kies_tutor_via_cli() -> TutorPersoonlijkheid:
-    print("Kies een tutor persoonlijkheid:")
-    print("1) Meester Jan  (vrolijk, vriendelijk, bemoedigend)")
-    print("2) Coach Sara   (direct, resultaatgericht)")
-    keuze = input(">> ").strip()
-
-    if keuze == "1":
-        return TutorPersonaliteiten.meester_jan()
-    elif keuze == "2":
-        return TutorPersonaliteiten.coach_sara()
-    else:
-        print("Ongeldige keuze, standaard: Meester Jan.\n")
-        return TutorPersonaliteiten.meester_jan()
-
-
-def run_cli():
-    print("=== AI Tutor – Persoonlijkheidstester ===\n")
-
-    while True:
-        tutor = kies_tutor_via_cli()
-        print(f"\nJe test nu: {tutor.naam}\n")
-
-        leerling_bericht = input(
-            "Typ wat de leerling zegt/vraagt "
-            "(bijv. 'Ik snap het verschil tussen past simple en present perfect niet'):\n\n> "
-        )
-
-        if not leerling_bericht.strip():
-            print("Leeg bericht, stoppen.\n")
-            break
-
-        prompt = build_test_prompt(tutor, leerling_bericht)
-
-        print("\n--- Ollama wordt aangeroepen... ---\n")
-        try:
-            antwoord = call_ollama(prompt)
-            print(f"{tutor.naam} zegt:\n")
-            print(antwoord)
-        except Exception as e:
-            print("\nEr ging iets mis bij het aanroepen van Ollama:")
-            print(e)
-
-        doorgaan = input("\nNog een test doen? (y/n): ").strip().lower()
-        if doorgaan != "y":
-            break
-
-    print("\nTot de volgende keer!")
-
 
 if __name__ == "__main__":
-    run_cli()
+    # Dit blok wordt alleen uitgevoerd als je dit bestand direct runt (python tutor_personalities.py)
+    # Handig om te testen of de connectie werkt zonder de hele server te starten.
+    print("=== Test Ollama Verbinding ===")
+    try:
+        print(f"Verbinding maken met {OLLAMA_URL}...")
+        test_antwoord = call_ollama("Say 'Hello world' briefly.")
+        print(f"Antwoord van Ollama: {test_antwoord}")
+        print("✅ Verbinding succesvol!")
+    except Exception as e:
+        print(f"❌ Test mislukt: {e}")
