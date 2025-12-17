@@ -1,160 +1,149 @@
-# main.py
-
+import os
+import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
-import uuid
+from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path 
 
-from tutor_personalities import TutorPersonaliteiten
-from conversation_manager import (
-    SessionState,
-    ConversationConfig,
-    ConversationManager,
-    session_state_to_public,
-)
+# --- IMPORTS ---
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
+# 1. Laad de sleutel uit .env (GEFORCEERD PAD)
+# Dit zoekt het .env bestand in precies dezelfde map als dit script
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
-app = FastAPI(title="AI Tutor Backend")
+# Controleer of de sleutel geladen is
+api_key = os.getenv("PORTKEY_API_KEY")
 
-# CORS voor frontend (pas origins aan als je wilt)
+if not api_key:
+    # Als de key niet gevonden is, printen we een duidelijke fout en stoppen we niet direct,
+    # maar de ChatOpenAI zal later wel klagen als we niks doen.
+    print(f"❌ LET OP: Geen PORTKEY_API_KEY gevonden in: {env_path}")
+    print("   Zorg dat je bestand '.env' heet (niet .env.txt) en in dezelfde map staat.")
+    # We zetten een dummy waarde zodat de server wel kan starten (voor debuggen), 
+    # maar chatten zal falen.
+    api_key = "ontbrekend"
+else:
+    print(f"✅ API Key succesvol geladen: {api_key[:5]}...")
+
+app = FastAPI()
+
+# CORS instellingen
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --- PORTKEY CONFIGURATIE ---
+headers = {
+    "x-portkey-api-key": api_key,
+    "x-portkey-provider": "openai", 
+    "Content-Type": "application/json"
+}
 
-# ==========================
-#   In-memory sessiebeheer
-# ==========================
+# De verbinding met de AI
+llm = ChatOpenAI(
+    api_key="dummy", 
+    base_url="https://api.portkey.ai/v1", 
+    model="gpt-5.1",  # <--- HIER STAAT JE NIEUWE MODEL
+    default_headers=headers
+)
 
-SESSIONS: Dict[str, ConversationManager] = {}
+# Geheugen opslag
+sessions = {}
 
-
-def get_manager(session_id: str) -> ConversationManager:
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return SESSIONS[session_id]
-
-
-# ==========================
-#   Pydantic modellen
-# ==========================
-
-class ConfigModel(BaseModel):
-    topic: str = "Present Perfect"
-    theme: str = "school"
-    skill: str = "grammar"
+# Datamodellen
+class SessionConfig(BaseModel):
+    topic: str
     difficulty: str = "medium"
+    skill: str = "general"
 
+class UserMessage(BaseModel):
+    text: str
 
-class CreateSessionRequest(BaseModel):
-    tutor: str = "jan"   # "jan" of "sara"
-    config: Optional[ConfigModel] = None
+# --- ENDPOINTS ---
 
+@app.post("/start_session/{tutor_id}")
+async def start_session(tutor_id: str, config: SessionConfig):
+    personas = {
+        "jan": {
+            "name": "Meester Jan",
+            "role": "Een geduldige, vriendelijke leraar die veel aanmoedigt.",
+            "style": "Gebruik eenvoudige taal, wees hulpvaardig en geef complimenten."
+        },
+        "sara": {
+            "name": "Coach Sara",
+            "role": "Een directe, energieke coach die focust op resultaat.",
+            "style": "Wees kort, krachtig, professioneel en daag de student uit."
+        }
+    }
+    
+    tutor = personas.get(tutor_id, personas["jan"])
+    
+    system_prompt = f"""
+    Je bent {tutor['name']}. {tutor['role']}
+    Jouw stijl is: {tutor['style']}
+    Het onderwerp is: {config.topic}.
+    Niveau: {config.difficulty}.
+    Reageer altijd in het Nederlands, tenzij het vak Engels is.
+    """
 
-class CreateSessionResponse(BaseModel):
-    session_id: str
-    state: Dict[str, Any]
-
-
-class ChatRequest(BaseModel):
-    message: str
-
-
-class ChatResponse(BaseModel):
-    reply: str
-    state: Dict[str, Any]
-
-
-class ExerciseResponse(BaseModel):
-    exercise: Dict[str, Any]
-    state: Dict[str, Any]
-
-
-class AnswerRequest(BaseModel):
-    answer: str
-
-
-class AnswerResponse(BaseModel):
-    check_result: Dict[str, Any]
-    feedback: Dict[str, Any]
-    summary_message: str
-    state: Dict[str, Any]
-
-
-class StateResponse(BaseModel):
-    state: Dict[str, Any]
-
-
-# ==========================
-#   Routes
-# ==========================
-
-@app.post("/api/session", response_model=CreateSessionResponse)
-def create_session(req: CreateSessionRequest):
-    # kies tutor
-    if req.tutor.lower() == "sara":
-        tutor = TutorPersonaliteiten.coach_sara()
-    else:
-        tutor = TutorPersonaliteiten.meester_jan()
-
-    cfg_data = req.config.dict() if req.config else {}
-    cfg = ConversationConfig(**cfg_data)
-
-    state = SessionState(tutor=tutor, config=cfg)
-    manager = ConversationManager(state=state)
-
+    import uuid
     session_id = str(uuid.uuid4())
-    SESSIONS[session_id] = manager
+    
+    sessions[session_id] = {
+        "history": [SystemMessage(content=system_prompt)],
+        "tutor": tutor
+    }
+    
+    return {
+        "session_id": session_id,
+        "state": {
+            "tutor": tutor,
+            "chat_history": []
+        }
+    }
 
-    return CreateSessionResponse(
-        session_id=session_id,
-        state=session_state_to_public(state),
-    )
-
-
-@app.get("/api/session/{session_id}", response_model=StateResponse)
-def get_session_state(session_id: str):
-    manager = get_manager(session_id)
-    return StateResponse(state=session_state_to_public(manager.state))
-
-
-@app.post("/api/session/{session_id}/chat", response_model=ChatResponse)
-def post_chat_message(session_id: str, req: ChatRequest):
-    manager = get_manager(session_id)
-    reply = manager.handle_user_chat(req.message)
-    return ChatResponse(
-        reply=reply,
-        state=session_state_to_public(manager.state),
-    )
-
-
-@app.post("/api/session/{session_id}/exercise", response_model=ExerciseResponse)
-def create_exercise(session_id: str):
-    manager = get_manager(session_id)
-    exercise = manager.request_new_exercise()
-    return ExerciseResponse(
-        exercise=exercise,
-        state=session_state_to_public(manager.state),
-    )
-
-
-@app.post("/api/session/{session_id}/answer", response_model=AnswerResponse)
-def submit_answer(session_id: str, req: AnswerRequest):
-    manager = get_manager(session_id)
-
+@app.post("/chat/{session_id}")
+async def chat(session_id: str, message: UserMessage):
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Sessie niet gevonden")
+    
+    session = sessions[session_id]
+    
+    # 1. Voeg bericht toe
+    session["history"].append(HumanMessage(content=message.text))
+    
     try:
-        result = manager.submit_answer(req.answer)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # 2. Stuur naar Portkey (gpt-5.1)
+        response = llm.invoke(session["history"])
+        ai_text = response.content
+        
+        # 3. Voeg antwoord toe
+        session["history"].append(AIMessage(content=ai_text))
+        
+        frontend_history = []
+        for msg in session["history"]:
+            if isinstance(msg, HumanMessage):
+                frontend_history.append({"role": "user", "text": msg.content})
+            elif isinstance(msg, AIMessage):
+                frontend_history.append({"role": "tutor", "text": msg.content})
+        
+        return {
+            "state": {
+                "tutor": session["tutor"],
+                "chat_history": frontend_history
+            }
+        }
+    except Exception as e:
+        print(f"Portkey Error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI Fout: {str(e)}")
 
-    return AnswerResponse(
-        check_result=result["check_result"],
-        feedback=result["feedback"],
-        summary_message=result["summary_message"],
-        state=session_state_to_public(manager.state),
-    )
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
