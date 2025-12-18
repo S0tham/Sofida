@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
-import { MoreVertical, Send, Dumbbell, X, Check, Edit2, Mic, StopCircle, Volume2, ChevronDown } from "lucide-react";
+// NIEUW: Loader2 toegevoegd aan imports
+import { MoreVertical, Send, Dumbbell, X, Check, Edit2, Mic, StopCircle, Volume2, Loader2 } from "lucide-react";
 import type { Vak } from "./types";
 import { TutorSettings } from "./TutorSettings";
 import * as api from "../api"; 
@@ -21,30 +22,23 @@ export function ChatView({ vak }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activeTutorId, setActiveTutorId] = useState<"jan" | "sara">("jan");
   
-  // Input Focus Ref (zodat we kunnen focussen)
   const inputRef = useRef<HTMLInputElement>(null);
-
-  // Audio
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Exercise Menu
   const [showExerciseMenu, setShowExerciseMenu] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState("grammar");
   const [selectedTopic, setSelectedTopic] = useState("Present Simple");
-
-  // Thema
   const [activeTheme, setActiveTheme] = useState("Algemeen");
 
-  // UI Helper: Is de laatste opdracht een schrijfopdracht?
   const isWritingTask = messages.length > 0 && messages[messages.length - 1].exercise?.type === 'writing';
 
+  // Automatisch scrollen bij nieuwe berichten OF als het laden begint/stopt
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  useEffect(() => scrollToBottom(), [messages]);
+  useEffect(() => scrollToBottom(), [messages, isLoading]);
 
-  // Focus input als er een nieuwe schrijfopdracht is
   useEffect(() => {
     if (isWritingTask && !isLoading) {
         inputRef.current?.focus();
@@ -56,7 +50,7 @@ export function ChatView({ vak }: Props) {
           const audioBlob = await api.speakText(text, activeTutorId);
           const audio = new Audio(URL.createObjectURL(audioBlob));
           audio.play();
-      } catch (e) { console.error(e); }
+      } catch (e) { console.error("Audio error (waarschijnlijk credits op)", e); }
   };
 
   const startSession = async (tutorId: "jan" | "sara") => {
@@ -77,7 +71,6 @@ export function ChatView({ vak }: Props) {
 
   useEffect(() => { startSession(vak.id === 'engels' ? 'sara' : 'jan'); }, [vak.id]);
 
-  // --- AUDIO LOGICA ---
   const startRecording = async () => {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -86,12 +79,14 @@ export function ChatView({ vak }: Props) {
         recorder.ondataavailable = (e) => chunks.push(e.data);
         recorder.onstop = async () => {
             setIsLoading(true); 
-            setMessages(prev => [...prev, { id: Date.now(), type: "user", text: "🎤 (Luisteren...)" }]);
+            // We gebruiken nu het 'echte' laadsymbool, dus dit tijdelijke bericht is minder nodig,
+            // maar kan handig zijn om aan te geven dat we specifiek audio verwerken.
+            setMessages(prev => [...prev, { id: Date.now(), type: "user", text: "🎤 (Audio verwerken...)" }]);
             try {
                 const data = await api.transcribeAudio(new Blob(chunks, { type: 'audio/webm' }));
-                setMessages(prev => prev.filter(m => m.text !== "🎤 (Luisteren...)"));
+                setMessages(prev => prev.filter(m => m.text !== "🎤 (Audio verwerken...)"));
                 if (data.text) handleSend(data.text);
-            } catch (err) { alert("Kon audio niet verstaan."); } finally { setIsLoading(false); }
+            } catch (err) { alert("Kon audio niet verstaan."); setMessages(prev => prev.filter(m => m.text !== "🎤 (Audio verwerken...)")); } finally { setIsLoading(false); }
         };
         mediaRecorderRef.current = recorder;
         recorder.start();
@@ -156,7 +151,8 @@ export function ChatView({ vak }: Props) {
 
   return (
     <>
-      <div className="h-full flex flex-col bg-white relative">
+      {/* AANGEPAST: w-full toegevoegd aan de hoofdcontainer */}
+      <div className="h-full w-full flex flex-col bg-white relative">
         {/* Tutor balk */}
         <div className="border-b border-gray-100 bg-white px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -172,7 +168,7 @@ export function ChatView({ vak }: Props) {
         </div>
 
         {/* Chat content */}
-        <div className="flex-1 overflow-auto p-6 space-y-6 bg-gray-50/30">
+        <div className="flex-1 overflow-auto p-6 space-y-6 bg-gray-50/30 w-full">
           {messages.map((msg, index) => {
             if (msg.type === "exercise" && msg.exercise) {
                return <div key={msg.id || index} className="flex justify-start w-full animate-in fade-in slide-in-from-bottom-2">
@@ -187,7 +183,18 @@ export function ChatView({ vak }: Props) {
               </div>
             );
           })}
-          {isLoading && <div className="text-center text-sm text-gray-400 italic">...</div>}
+
+          {/* NIEUW: HET BEWEGENDE LAADSYMBOOL */}
+          {isLoading && (
+              <div className="flex justify-start w-full animate-in fade-in slide-in-from-bottom-2">
+                  <div className="bg-white border border-gray-100 rounded-bl-sm rounded-2xl px-5 py-3 shadow-sm flex items-center gap-3 text-gray-500">
+                      {/* animate-spin laat het icoon draaien */}
+                      <Loader2 className="w-5 h-5 animate-spin text-[#5D64BE]" />
+                      <span className="text-sm italic">Aan het typen...</span>
+                  </div>
+              </div>
+          )}
+          
           <div ref={messagesEndRef} />
         </div>
 
@@ -227,13 +234,12 @@ export function ChatView({ vak }: Props) {
         )}
 
         {/* Input balk */}
-        <div className="border-t border-gray-100 p-6 bg-white">
+        <div className="border-t border-gray-100 p-6 bg-white w-full">
           <div className="w-full flex gap-3 items-center">
             <button onClick={() => setShowExerciseMenu(!showExerciseMenu)} className={`p-3 rounded-lg transition-colors ${showExerciseMenu ? "bg-[#5D64BE] text-white" : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100"}`}>
               <Dumbbell className="w-5 h-5" />
             </button>
 
-            {/* AANGEPASTE INPUT: Ref en Placeholder */}
             <input 
                 ref={inputRef}
                 type="text" 
@@ -264,7 +270,7 @@ function ExerciseCard({ exercise, tutorId }: { exercise: api.Exercise, tutorId: 
           const audioBlob = await api.speakText(textToRead, tutorId);
           const audio = new Audio(URL.createObjectURL(audioBlob));
           audio.play();
-      } catch(e) { console.error(e); }
+      } catch(e) { console.error("Audio error", e); }
   };
 
   if (!exercise || !exercise.question) return <div className="p-4 bg-red-50 border border-red-200 text-red-800 text-xs">Error: {JSON.stringify(exercise)}</div>;

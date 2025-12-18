@@ -165,7 +165,15 @@ async def start_session(config: SessionConfig):
     }
     tutor = personas.get(config.tutor_id, personas["jan"])
     
-    system_prompt = f"Je bent {tutor['name']}. {tutor['role']}. Als gevraagd om oefening, zeg ALLEEN: [GENERATE_EXERCISE]"
+    # AANGEPAST: Instructie voor max. 150 woorden toegevoegd
+    system_prompt = f"""
+    Je bent {tutor['name']}. {tutor['role']}. Jouw stijl is {tutor['style']}.
+    
+    BELANGRIJKE REGELS:
+    1. Houd je normale antwoorden en uitleg beknopt (maximaal 150 woorden). Probeer 'to the point' te blijven.
+    2. Als de gebruiker vraagt om een oefening, zeg dan ALLEEN: [GENERATE_EXERCISE]
+    """
+    
     session_id = str(uuid.uuid4())
     sessions[session_id] = { "history": [SystemMessage(content=system_prompt)], "tutor": tutor, "config": config, "active_theme": "Algemeen" }
     
