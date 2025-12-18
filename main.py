@@ -3,6 +3,7 @@ import uvicorn
 import json
 import uuid
 import re 
+import random # <--- NIEUW: Nodig voor de 50/50 kans
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -63,8 +64,8 @@ class ThemeUpdate(BaseModel):
     theme: str
 
 class ExerciseRequest(BaseModel):
-    theme: str # Dit gebruiken we nu als specific topic
-    skill: str = "general" # Nieuw veld
+    theme: str 
+    skill: str = "general" 
 
 class SpeakRequest(BaseModel):
     text: str
@@ -84,10 +85,17 @@ def normalize_exercise_data(data, skill_type):
     if not data: return None
     normalized = {k.lower(): v for k, v in data.items()}
     
-    # Bepaal type op basis van de data of fallback
     ex_type = normalized.get("type", "multiple_choice")
-    if skill_type == "writing": ex_type = "writing"
-    elif skill_type == "grammar": ex_type = "gap_fill"
+    
+    # Forceer het type als de AI het vergeet, maar respecteer de random keuze van de prompt
+    if skill_type == "writing": 
+        ex_type = "writing"
+    elif skill_type == "grammar": 
+        # Hier checken we wat de AI heeft bedacht (gap_fill of mc)
+        if "gap_fill" in ex_type or "___" in normalized.get("question", ""):
+            ex_type = "gap_fill"
+        else:
+            ex_type = "multiple_choice"
 
     return {
         "type": ex_type,
@@ -98,31 +106,38 @@ def normalize_exercise_data(data, skill_type):
     }
 
 def create_exercise_json(history, topic, specific_topic, skill):
-    # Dynamische prompt op basis van skill
     prompt_instruction = ""
     
     if skill == "writing":
         prompt_instruction = """
         TYPE: Schrijfopdracht (Writing).
-        TAAK: Geef de student een korte schrijfopdracht (bijv. 'Schrijf een email aan...').
+        TAAK: Geef de student een korte, creatieve schrijfopdracht (bijv. 'Schrijf een korte email aan...').
         JSON FORMAT: { "type": "writing", "question": "De opdracht...", "options": [], "explanation": "Waar de student op moet letten." }
         """
     elif skill == "grammar":
-        prompt_instruction = """
-        TYPE: Gap Fill (Grammatica).
-        TAAK: Maak een zin met een ontbrekend woord (___) gericht op het onderwerp.
-        JSON FORMAT: { "type": "gap_fill", "question": "Zin met ___ erin", "options": ["optie A", "optie B"], "correct_answer": "optie A", "explanation": "Grammaticale uitleg." }
-        """
+        # 50/50 KANS LOGICA
+        if random.choice([True, False]):
+            prompt_instruction = """
+            TYPE: Gap Fill (Grammatica).
+            TAAK: Maak een zin die past bij het onderwerp, met 1 ontbrekend woord (___) dat de grammatica test.
+            JSON FORMAT: { "type": "gap_fill", "question": "Zin met ___ erin", "options": ["optie A", "optie B", "optie C"], "correct_answer": "optie A", "explanation": "Korte grammaticale uitleg." }
+            """
+        else:
+            prompt_instruction = """
+            TYPE: Multiple Choice (Grammatica).
+            TAAK: Stel een vraag over een grammaticaregel (bijv. 'Welke zin is correct?' of 'Welke tijd is dit?').
+            JSON FORMAT: { "type": "multiple_choice", "question": "De grammaticavraag...", "options": ["Optie A", "Optie B", "Optie C"], "correct_answer": "Optie A", "explanation": "Korte grammaticale uitleg." }
+            """
     elif skill == "reading":
         prompt_instruction = """
         TYPE: Begrijpend Lezen.
-        TAAK: Geef een zéér korte tekst (2 zinnen) en een vraag daarover.
-        JSON FORMAT: { "type": "multiple_choice", "question": "Tekst... Vraag...", "options": ["A", "B", "C"], "correct_answer": "A", "explanation": "Uitleg." }
+        TAAK: Schrijf een zéér korte tekst (max 3 zinnen) en stel er een vraag over.
+        JSON FORMAT: { "type": "multiple_choice", "question": "Tekst: ... Vraag: ...", "options": ["A", "B", "C"], "correct_answer": "A", "explanation": "Uitleg." }
         """
     else: # General/Vocabulary
         prompt_instruction = """
-        TYPE: Multiple Choice.
-        JSON FORMAT: { "type": "multiple_choice", "question": "Vraag...", "options": ["A", "B"], "correct_answer": "A", "explanation": "Uitleg." }
+        TYPE: Multiple Choice (Woordenschat).
+        JSON FORMAT: { "type": "multiple_choice", "question": "Vraag...", "options": ["A", "B", "C"], "correct_answer": "A", "explanation": "Uitleg." }
         """
 
     prompt = f"""
@@ -169,7 +184,6 @@ async def chat(session_id: str, message: UserMessage):
         
         if "[GENERATE_EXERCISE]" in ai_text:
             ai_text = ai_text.replace("[GENERATE_EXERCISE]", "").strip() or "Hier is een oefening!"
-            # Bij automatische generatie via chat gebruiken we defaults
             exercise_data = create_exercise_json(session["history"], session["config"].topic, session["active_theme"], "general")
         
         session["history"].append(AIMessage(content=ai_text))
@@ -189,7 +203,6 @@ async def generate_exercise_endpoint(session_id: str, req: ExerciseRequest):
     if session_id not in sessions: raise HTTPException(404)
     session = sessions[session_id]
     
-    # We gebruiken de topic en skill uit het request
     topic_to_use = req.theme if req.theme else session["active_theme"]
     skill_to_use = req.skill if req.skill else "general"
     
