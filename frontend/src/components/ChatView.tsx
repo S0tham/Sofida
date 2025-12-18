@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-// BELANGRIJK: Hier importeren we de iconen voor de microfoon en speaker
-import { MoreVertical, Send, Dumbbell, X, Check, Edit2, Mic, StopCircle, Volume2 } from "lucide-react";
+import { MoreVertical, Send, Dumbbell, X, Check, Edit2, Mic, StopCircle, Volume2, ChevronDown } from "lucide-react";
 import type { Vak } from "./types";
 import { TutorSettings } from "./TutorSettings";
 import * as api from "../api"; 
@@ -22,29 +21,30 @@ export function ChatView({ vak }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activeTutorId, setActiveTutorId] = useState<"jan" | "sara">("jan");
   
-  // --- AUDIO STATE ---
+  // Audio
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   
+  // UI Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Exercise Menu State
+  const [showExerciseMenu, setShowExerciseMenu] = useState(false);
+  const [selectedSkill, setSelectedSkill] = useState("grammar");
+  const [selectedTopic, setSelectedTopic] = useState("Present Simple");
+
+  // Thema (Global)
   const [activeTheme, setActiveTheme] = useState("Algemeen");
-  const [isEditingTheme, setIsEditingTheme] = useState(false);
-  const [tempTheme, setTempTheme] = useState("");
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   useEffect(() => scrollToBottom(), [messages]);
 
-  // Hulpfunctie: Laat de tutor praten (ElevenLabs via Backend)
   const playTutorAudio = async (text: string) => {
       try {
-          console.log("🔊 Audio ophalen voor:", text.substring(0, 20) + "...");
           const audioBlob = await api.speakText(text, activeTutorId);
-          const audioUrl = URL.createObjectURL(audioBlob);
-          const audio = new Audio(audioUrl);
+          const audio = new Audio(URL.createObjectURL(audioBlob));
           audio.play();
-      } catch (e) {
-          console.error("Kon audio niet afspelen", e);
-      }
+      } catch (e) { console.error(e); }
   };
 
   const startSession = async (tutorId: "jan" | "sara") => {
@@ -57,70 +57,39 @@ export function ChatView({ vak }: Props) {
       setSessionId(data.session_id);
       setActiveTutorId(tutorId);
       setActiveTheme(data.state.theme || "Algemeen");
-      
       const welcomeText = `Hoi! Ik ben ${data.state.tutor.name}. We gaan aan de slag met ${vak.naam}.`;
       setMessages([{ id: Date.now(), type: "tutor", text: welcomeText }]);
-      
-      // Spreek welkomstbericht uit
       playTutorAudio(welcomeText);
-
     } catch (error) { console.error(error); } finally { setIsLoading(false); }
   };
 
-  useEffect(() => {
-    const defaultTutor = vak.id === 'engels' ? 'sara' : 'jan';
-    startSession(defaultTutor);
-  }, [vak.id]);
+  useEffect(() => { startSession(vak.id === 'engels' ? 'sara' : 'jan'); }, [vak.id]);
 
-  // --- OPNEMEN MET MICROFOON (Naar Scribe) ---
+  // --- AUDIO LOGICA ---
   const startRecording = async () => {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const recorder = new MediaRecorder(stream);
         const chunks: BlobPart[] = [];
-
         recorder.ondataavailable = (e) => chunks.push(e.data);
-        
         recorder.onstop = async () => {
-            const audioBlob = new Blob(chunks, { type: 'audio/webm' }); // Browsers nemen vaak op in webm
             setIsLoading(true); 
-            
-            // Zet een tijdelijk berichtje neer zodat je ziet dat hij bezig is
-            setMessages(prev => [...prev, { id: Date.now(), type: "user", text: "🎤 (Aan het luisteren...)" }]);
-
+            setMessages(prev => [...prev, { id: Date.now(), type: "user", text: "🎤 (Luisteren...)" }]);
             try {
-                // Stuur audio naar backend -> ElevenLabs Scribe
-                const data = await api.transcribeAudio(audioBlob);
-                
-                // Verwijder het "luisteren..." bericht
-                setMessages(prev => prev.filter(m => m.text !== "🎤 (Aan het luisteren...)"));
-
-                if (data.text) {
-                    // Verstuur de tekst die Scribe heeft gevonden
-                    handleSend(data.text);
-                }
-            } catch (err) {
-                console.error("Scribe error:", err);
-                setMessages(prev => prev.filter(m => m.text !== "🎤 (Aan het luisteren...)"));
-                alert("Kon audio niet verstaan.");
-            } finally {
-                setIsLoading(false);
-            }
+                const data = await api.transcribeAudio(new Blob(chunks, { type: 'audio/webm' }));
+                setMessages(prev => prev.filter(m => m.text !== "🎤 (Luisteren...)"));
+                if (data.text) handleSend(data.text);
+            } catch (err) { alert("Kon audio niet verstaan."); } finally { setIsLoading(false); }
         };
-
         mediaRecorderRef.current = recorder;
         recorder.start();
         setIsRecording(true);
-    } catch (err) {
-        console.error("Mic error", err);
-        alert("Kan microfoon niet starten. Heb je toestemming gegeven?");
-    }
+    } catch (err) { alert("Kan microfoon niet starten."); }
   };
 
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
         mediaRecorderRef.current.stop();
-        // Stop ook de tracks om het rode bolletje in de tab te doven
         mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
         setIsRecording(false);
     }
@@ -129,53 +98,58 @@ export function ChatView({ vak }: Props) {
   const handleSend = async (textToSend: string = message) => {
     if (!textToSend.trim() || !sessionId) return;
     
-    // Voeg user bericht toe (als het nog niet in de lijst staat via de microfoon logica)
     setMessages((prev) => {
-        // Voorkom dubbele berichten als de functie snel achter elkaar wordt aangeroepen
-        if (prev.length > 0 && prev[prev.length - 1].text === textToSend && prev[prev.length - 1].type === "user") {
-            return prev;
-        }
+        if (prev.length > 0 && prev[prev.length - 1].text === textToSend && prev[prev.length - 1].type === "user") return prev;
         return [...prev, { id: Date.now(), type: "user", text: textToSend }];
     });
-
     setMessage("");
     setIsLoading(true);
 
     try {
       const data = await api.sendMessage(sessionId, textToSend);
-      
       if (data && data.state && data.state.chat_history) {
           const lastMsg = data.state.chat_history[data.state.chat_history.length - 1];
-          
           const newMessages: UIMessage[] = data.state.chat_history.map((msg: any, idx: number) => {
-            if (msg.role === 'exercise' || msg.exercise) {
-               return { id: Date.now() + idx, type: 'exercise', exercise: msg.exercise };
-            }
+            if (msg.role === 'exercise' || msg.exercise) return { id: Date.now() + idx, type: 'exercise', exercise: msg.exercise };
             return { id: Date.now() + idx, type: msg.role === 'user' ? 'user' : 'tutor', text: msg.text || "..." };
           });
           setMessages(newMessages);
-
-          // Als het laatste bericht van de tutor is, spreek het uit
-          if (lastMsg && lastMsg.role !== 'user' && lastMsg.role !== 'exercise') {
-              playTutorAudio(lastMsg.text);
-          }
+          if (lastMsg && lastMsg.role !== 'user' && lastMsg.role !== 'exercise') playTutorAudio(lastMsg.text);
       }
     } catch (error) { console.error(error); } finally { setIsLoading(false); }
   };
 
-  const handleThemeUpdate = async () => {
-      if(!sessionId || !tempTheme.trim()) return;
-      await api.setTheme(sessionId, tempTheme);
-      setActiveTheme(tempTheme);
-      setIsEditingTheme(false);
-      handleSend(`Ik wil de opdrachten nu graag over het thema '${tempTheme}' hebben.`);
-  };
+  // --- OEFENING MENU LOGICA ---
+  const handleGenerateSpecificExercise = async () => {
+      if(!sessionId) return;
+      setShowExerciseMenu(false); // Menu sluiten
+      setIsLoading(true);
+      
+      // Feedback in chat dat we bezig zijn
+      setMessages(prev => [...prev, {id: Date.now(), type: "tutor", text: `Ik maak even een ${selectedSkill} oefening over ${selectedTopic}...`}]);
 
-  const requestExercise = () => handleSend("Geef me een oefening over het huidige thema.");
+      try {
+          // Specifieke request naar backend
+          const exercise = await api.generateExercise(sessionId, selectedSkill, selectedTopic);
+          setMessages(prev => [...prev, { id: Date.now(), type: "exercise", exercise: exercise }]);
+          
+          // Als het een schrijfopdracht is, laten we de tutor het even inleiden
+          if(exercise.type === 'writing') {
+             const intro = "Hier is je schrijfopdracht. Typ je antwoord gewoon in de chat, dan kijk ik het na!";
+             playTutorAudio(intro);
+          }
+
+      } catch (e) {
+          console.error(e);
+          setMessages(prev => [...prev, {id: Date.now(), type: "tutor", text: "Oeps, er ging iets mis bij het maken van de oefening."}]);
+      } finally {
+          setIsLoading(false);
+      }
+  };
 
   return (
     <>
-      <div className="h-full flex flex-col bg-white">
+      <div className="h-full flex flex-col bg-white relative">
         {/* Tutor balk */}
         <div className="border-b border-gray-100 bg-white px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -184,29 +158,10 @@ export function ChatView({ vak }: Props) {
              </div>
              <div>
                 <div className="text-gray-900 font-medium">{activeTutorId === 'jan' ? 'Meester Jan' : 'Coach Sara'}</div>
-                <div className="text-xs text-gray-500 flex gap-2">
-                   <button onClick={() => startSession('jan')} className={`hover:text-[#5D64BE] ${activeTutorId === 'jan' ? 'font-bold text-[#5D64BE]' : ''}`}>Jan</button>|
-                   <button onClick={() => startSession('sara')} className={`hover:text-[#5D64BE] ${activeTutorId === 'sara' ? 'font-bold text-[#5D64BE]' : ''}`}>Sara</button>
-                </div>
+                <div className="text-xs text-gray-500">Thema: {activeTheme}</div>
              </div>
           </div>
           <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-50 rounded-lg"><MoreVertical className="w-5 h-5 text-gray-600" /></button>
-        </div>
-
-        {/* Thema Balk */}
-        <div className="bg-indigo-50/50 border-b border-indigo-100 px-6 py-2 flex items-center justify-between text-sm">
-            {isEditingTheme ? (
-                <div className="flex w-full gap-2">
-                    <input className="flex-1 px-2 py-1 rounded border border-indigo-200" value={tempTheme} onChange={(e) => setTempTheme(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleThemeUpdate()} placeholder="Thema..." />
-                    <button onClick={handleThemeUpdate} className="text-[#5D64BE]">Opslaan</button>
-                    <button onClick={() => setIsEditingTheme(false)} className="text-gray-400"><X className="w-4 h-4"/></button>
-                </div>
-            ) : (
-                <div className="flex w-full justify-between items-center group">
-                    <span className="text-gray-600">Thema: <span className="font-semibold text-[#5D64BE]">{activeTheme}</span></span>
-                    <button onClick={() => { setTempTheme(activeTheme); setIsEditingTheme(true); }} className="text-gray-400 hover:text-[#5D64BE] flex items-center gap-1 opacity-0 group-hover:opacity-100"><Edit2 className="w-3 h-3" /> Wijzig</button>
-                </div>
-            )}
         </div>
 
         {/* Chat content */}
@@ -229,30 +184,72 @@ export function ChatView({ vak }: Props) {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input balk - HIER ZITEN DE KNOPPEN */}
+        {/* Oefening Menu Popover (Verschijnt boven input) */}
+        {showExerciseMenu && (
+            <div className="absolute bottom-24 left-6 bg-white border border-indigo-100 rounded-xl shadow-xl p-4 w-72 animate-in slide-in-from-bottom-5 z-10">
+                <div className="flex justify-between items-center mb-3">
+                    <h3 className="font-semibold text-gray-700">Oefening Maken</h3>
+                    <button onClick={() => setShowExerciseMenu(false)}><X className="w-4 h-4 text-gray-400"/></button>
+                </div>
+                
+                <div className="space-y-3">
+                    <div>
+                        <label className="text-xs font-medium text-gray-500 uppercase">Soort Opdracht</label>
+                        <select 
+                            className="w-full mt-1 p-2 bg-gray-50 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-[#5D64BE]"
+                            value={selectedSkill}
+                            onChange={(e) => setSelectedSkill(e.target.value)}
+                        >
+                            <option value="grammar">Grammatica (Gap Fill)</option>
+                            <option value="reading">Begrijpend Lezen</option>
+                            <option value="writing">Schrijven (Open vraag)</option>
+                            <option value="vocabulary">Woordenschat</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="text-xs font-medium text-gray-500 uppercase">Onderwerp</label>
+                        <select 
+                            className="w-full mt-1 p-2 bg-gray-50 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-[#5D64BE]"
+                            value={selectedTopic}
+                            onChange={(e) => setSelectedTopic(e.target.value)}
+                        >
+                            <option value={activeTheme}>Huidig Thema ({activeTheme})</option>
+                            <option value="Present Simple">Present Simple</option>
+                            <option value="Present Continuous">Present Continuous</option>
+                            <option value="Past Simple">Past Simple</option>
+                            <option value="Present Perfect">Present Perfect</option>
+                            <option value="Future Tense">Future Tense</option>
+                            <option value="Irregular Verbs">Irregular Verbs</option>
+                        </select>
+                    </div>
+
+                    <button 
+                        onClick={handleGenerateSpecificExercise}
+                        className="w-full py-2 bg-[#5D64BE] text-white rounded-lg font-medium hover:bg-[#4A519E] transition-colors flex items-center justify-center gap-2"
+                    >
+                        <Dumbbell className="w-4 h-4" /> Start Oefening
+                    </button>
+                </div>
+            </div>
+        )}
+
+        {/* Input balk */}
         <div className="border-t border-gray-100 p-6 bg-white">
           <div className="w-full flex gap-3 items-center">
-            {/* 1. Oefening knop (Dumbbell) */}
-            <button onClick={requestExercise} className="p-3 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors" title="Genereer oefening">
+            {/* Oefening knop (Opent nu het menu) */}
+            <button 
+                onClick={() => setShowExerciseMenu(!showExerciseMenu)} 
+                className={`p-3 rounded-lg transition-colors ${showExerciseMenu ? "bg-[#5D64BE] text-white" : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100"}`}
+                title="Oefening Menu"
+            >
               <Dumbbell className="w-5 h-5" />
             </button>
 
-            {/* 2. Tekst invoer */}
             <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSend()} placeholder="Typ of spreek..." className="flex-1 px-4 py-3 bg-gray-50 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5D64BE]/20" />
             
-            {/* 3. MICROFOON KNOP (Hier miste je hem waarschijnlijk!) */}
-            <button 
-                onClick={isRecording ? stopRecording : startRecording}
-                className={`p-3 rounded-lg transition-colors ${isRecording ? "bg-red-500 text-white animate-pulse" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
-                title="Houd ingedrukt of klik om op te nemen"
-            >
-                {isRecording ? <StopCircle className="w-5 h-5"/> : <Mic className="w-5 h-5" />}
-            </button>
-
-            {/* 4. Verzend knop */}
-            <button onClick={() => handleSend()} disabled={!message.trim()} className="px-5 py-3 bg-[#5D64BE] text-white rounded-lg hover:bg-[#5D64BE]/90 transition-colors">
-              <Send className="w-5 h-5" />
-            </button>
+            <button onClick={isRecording ? stopRecording : startRecording} className={`p-3 rounded-lg transition-colors ${isRecording ? "bg-red-500 text-white animate-pulse" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>{isRecording ? <StopCircle className="w-5 h-5"/> : <Mic className="w-5 h-5" />}</button>
+            <button onClick={() => handleSend()} disabled={!message.trim()} className="px-5 py-3 bg-[#5D64BE] text-white rounded-lg hover:bg-[#5D64BE]/90 transition-colors"><Send className="w-5 h-5" /></button>
           </div>
         </div>
       </div>
@@ -266,10 +263,9 @@ function ExerciseCard({ exercise, tutorId }: { exercise: api.Exercise, tutorId: 
   const [selected, setSelected] = useState<string | null>(null);
   const [showResult, setShowResult] = useState(false);
 
-  // Functie om de vraag voor te lezen
   const readQuestion = async () => {
       try {
-          const textToRead = `${exercise.question}. ${exercise.options.join(". ")}`;
+          const textToRead = `${exercise.question}. ${exercise.options ? exercise.options.join(". ") : ""}`;
           const audioBlob = await api.speakText(textToRead, tutorId);
           const audio = new Audio(URL.createObjectURL(audioBlob));
           audio.play();
@@ -278,14 +274,34 @@ function ExerciseCard({ exercise, tutorId }: { exercise: api.Exercise, tutorId: 
 
   if (!exercise || !exercise.question) return <div className="p-4 bg-red-50 border border-red-200 text-red-800 text-xs">Error: {JSON.stringify(exercise)}</div>;
 
+  // Render logica voor Schrijfopdracht (heeft geen opties)
+  if (exercise.type === 'writing') {
+      return (
+        <div className="w-full max-w-lg bg-white border border-orange-100 rounded-2xl p-5 shadow-md my-2">
+            <div className="flex items-center justify-between mb-3 text-orange-600 font-medium text-sm">
+                <span className="flex items-center gap-2"><Edit2 className="w-4 h-4" /> Schrijfopdracht</span>
+                <button onClick={readQuestion} className="p-1.5 hover:bg-orange-50 rounded-full"><Volume2 className="w-4 h-4"/></button>
+            </div>
+            <h3 className="text-gray-900 font-semibold mb-2 text-lg">{exercise.question}</h3>
+            <p className="text-sm text-gray-500 italic mb-4">{exercise.explanation || "Typ je antwoord in de chat."}</p>
+            <div className="text-xs bg-gray-50 p-2 rounded text-gray-400">
+                (Typ je antwoord in de balk hieronder en verstuur het)
+            </div>
+        </div>
+      );
+  }
+
+  // Render logica voor Multiple Choice / Gap Fill
   const checkAnswer = (option: string) => { setSelected(option); setShowResult(true); };
 
   return (
     <div className="w-full max-w-lg bg-white border border-indigo-100 rounded-2xl p-5 shadow-md my-2">
       <div className="flex items-center justify-between mb-3 text-indigo-600 font-medium text-sm">
-        <span className="flex items-center gap-2"><Dumbbell className="w-4 h-4" /> Oefening</span>
-        {/* HIER ZIT HET SPEAKERTJE VOOR DE VRAAG */}
-        <button onClick={readQuestion} className="p-1.5 hover:bg-indigo-50 rounded-full" title="Lees voor"><Volume2 className="w-4 h-4"/></button>
+        <span className="flex items-center gap-2">
+            <Dumbbell className="w-4 h-4" /> 
+            {exercise.type === 'gap_fill' ? "Vul in" : "Kies het juiste antwoord"}
+        </span>
+        <button onClick={readQuestion} className="p-1.5 hover:bg-indigo-50 rounded-full"><Volume2 className="w-4 h-4"/></button>
       </div>
       <h3 className="text-gray-900 font-semibold mb-4 text-lg">{exercise.question}</h3>
       <div className="space-y-2">

@@ -11,8 +11,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-
-# We hebben alleen ElevenLabs nodig!
 from elevenlabs.client import ElevenLabs 
 
 # 1. Setup
@@ -40,7 +38,6 @@ headers = {
     "Content-Type": "application/json"
 }
 
-# 2. AI Configuraties
 llm = ChatOpenAI(
     api_key="dummy",
     base_url="https://api.portkey.ai/v1",
@@ -48,7 +45,6 @@ llm = ChatOpenAI(
     default_headers=headers
 )
 
-# ElevenLabs Client (voor Scribe ÉN Spreken)
 eleven_client = ElevenLabs(api_key=eleven_key)
 
 sessions = {}
@@ -67,7 +63,8 @@ class ThemeUpdate(BaseModel):
     theme: str
 
 class ExerciseRequest(BaseModel):
-    theme: str
+    theme: str # Dit gebruiken we nu als specific topic
+    skill: str = "general" # Nieuw veld
 
 class SpeakRequest(BaseModel):
     text: str
@@ -83,31 +80,68 @@ def extract_and_parse_json(text):
     except: pass
     return None
 
-def normalize_exercise_data(data):
+def normalize_exercise_data(data, skill_type):
     if not data: return None
     normalized = {k.lower(): v for k, v in data.items()}
+    
+    # Bepaal type op basis van de data of fallback
+    ex_type = normalized.get("type", "multiple_choice")
+    if skill_type == "writing": ex_type = "writing"
+    elif skill_type == "grammar": ex_type = "gap_fill"
+
     return {
+        "type": ex_type,
         "question": normalized.get("question", "Geen vraag ontvangen"),
-        "options": normalized.get("options", ["Fout bij laden"]),
+        "options": normalized.get("options", []),
         "correct_answer": normalized.get("correct_answer") or normalized.get("answer") or "",
         "explanation": normalized.get("explanation", "")
     }
 
-def create_exercise_json(history, topic, theme):
+def create_exercise_json(history, topic, specific_topic, skill):
+    # Dynamische prompt op basis van skill
+    prompt_instruction = ""
+    
+    if skill == "writing":
+        prompt_instruction = """
+        TYPE: Schrijfopdracht (Writing).
+        TAAK: Geef de student een korte schrijfopdracht (bijv. 'Schrijf een email aan...').
+        JSON FORMAT: { "type": "writing", "question": "De opdracht...", "options": [], "explanation": "Waar de student op moet letten." }
+        """
+    elif skill == "grammar":
+        prompt_instruction = """
+        TYPE: Gap Fill (Grammatica).
+        TAAK: Maak een zin met een ontbrekend woord (___) gericht op het onderwerp.
+        JSON FORMAT: { "type": "gap_fill", "question": "Zin met ___ erin", "options": ["optie A", "optie B"], "correct_answer": "optie A", "explanation": "Grammaticale uitleg." }
+        """
+    elif skill == "reading":
+        prompt_instruction = """
+        TYPE: Begrijpend Lezen.
+        TAAK: Geef een zéér korte tekst (2 zinnen) en een vraag daarover.
+        JSON FORMAT: { "type": "multiple_choice", "question": "Tekst... Vraag...", "options": ["A", "B", "C"], "correct_answer": "A", "explanation": "Uitleg." }
+        """
+    else: # General/Vocabulary
+        prompt_instruction = """
+        TYPE: Multiple Choice.
+        JSON FORMAT: { "type": "multiple_choice", "question": "Vraag...", "options": ["A", "B"], "correct_answer": "A", "explanation": "Uitleg." }
+        """
+
     prompt = f"""
-    CONTEXT: De student is bezig met {topic}. THEMA: {theme}.
-    TAAK: Genereer 1 multiple choice vraag.
-    JSON FORMAT: {{ "question": "...", "options": ["..."], "correct_answer": "...", "explanation": "..." }}
+    VAK: {topic}
+    ONDERWERP: {specific_topic}
+    SKILL: {skill}
+    {prompt_instruction}
+    
+    BELANGRIJK: Geef ALLEEN de ruwe JSON code terug.
     """
+    
     messages = history[-5:] + [HumanMessage(content=prompt)]
     try:
         response = llm.invoke(messages)
         data = extract_and_parse_json(response.content)
-        return normalize_exercise_data(data)
+        return normalize_exercise_data(data, skill)
     except: return None
 
 # --- ENDPOINTS ---
-
 @app.post("/start_session")
 async def start_session(config: SessionConfig):
     personas = {
@@ -135,7 +169,8 @@ async def chat(session_id: str, message: UserMessage):
         
         if "[GENERATE_EXERCISE]" in ai_text:
             ai_text = ai_text.replace("[GENERATE_EXERCISE]", "").strip() or "Hier is een oefening!"
-            exercise_data = create_exercise_json(session["history"], session["config"].topic, session["active_theme"])
+            # Bij automatische generatie via chat gebruiken we defaults
+            exercise_data = create_exercise_json(session["history"], session["config"].topic, session["active_theme"], "general")
         
         session["history"].append(AIMessage(content=ai_text))
         
@@ -153,8 +188,12 @@ async def chat(session_id: str, message: UserMessage):
 async def generate_exercise_endpoint(session_id: str, req: ExerciseRequest):
     if session_id not in sessions: raise HTTPException(404)
     session = sessions[session_id]
-    theme = req.theme if req.theme else session["active_theme"]
-    data = create_exercise_json(session["history"], session["config"].topic, theme)
+    
+    # We gebruiken de topic en skill uit het request
+    topic_to_use = req.theme if req.theme else session["active_theme"]
+    skill_to_use = req.skill if req.skill else "general"
+    
+    data = create_exercise_json(session["history"], session["config"].topic, topic_to_use, skill_to_use)
     if not data: raise HTTPException(500, "Mislukt")
     return data
 
@@ -164,54 +203,22 @@ async def set_theme(session_id: str, update: ThemeUpdate):
     sessions[session_id]["active_theme"] = update.theme
     return {"status": "ok"}
 
-# --- ELEVENLABS SCRIBE (LUISTEREN) ---
 @app.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
-    """Gebruikt ElevenLabs Scribe om audio naar tekst te vertalen"""
     try:
-        # We lezen het bestand in het geheugen
-        audio_content = await file.read()
-        
-        # We sturen de bytes direct naar ElevenLabs Scribe
-        transcription = eleven_client.speech_to_text.convert(
-            file=audio_content,
-            model_id="scribe_v1"  # Het nieuwe Scribe model
-        )
-        
-        # Scribe geeft direct de tekst terug in de response
+        content = await file.read()
+        transcription = eleven_client.speech_to_text.convert(file=content, model_id="scribe_v1")
         return {"text": transcription.text}
-    except Exception as e:
-        print(f"Scribe Error: {e}")
-        raise HTTPException(500, str(e))
+    except Exception as e: raise HTTPException(500, str(e))
 
-# --- ELEVENLABS TTS (SPREKEN) ---
 @app.post("/speak")
 async def speak_text(req: SpeakRequest):
-    print(f"🔊 Audio verzoek voor: {req.tutor_id}. Tekst: {req.text[:20]}...")
     try:
-        voice_id = "ErXwobaYiN019PkySvjV" 
-        if req.tutor_id == "sara":
-            voice_id = "EXAVITQu4vr4xnSDxMaL"
-            
-        print(f"🎤 Verbinding maken met ElevenLabs met key: {eleven_key[:5]}... en voice: {voice_id}")
-        
-        audio_stream = eleven_client.text_to_speech.convert(
-            voice_id=voice_id,
-            output_format="mp3_44100_128",
-            text=req.text,
-            model_id="eleven_multilingual_v2"
-        )
-        
-        print("✅ Audio stream ontvangen van ElevenLabs!")
-        
-        def iterfile():
-            yield from audio_stream
-
+        voice_id = "ErXwobaYiN019PkySvjV" if req.tutor_id == "jan" else "EXAVITQu4vr4xnSDxMaL"
+        audio_stream = eleven_client.text_to_speech.convert(voice_id=voice_id, output_format="mp3_44100_128", text=req.text, model_id="eleven_multilingual_v2")
+        def iterfile(): yield from audio_stream
         return StreamingResponse(iterfile(), media_type="audio/mpeg")
-    except Exception as e:
-        print(f"❌ ElevenLabs TTS FOUT: {e}")
-        # Dit print de volledige foutmelding, dat helpt ons enorm!
-        raise HTTPException(500, str(e))
+    except Exception as e: raise HTTPException(500, str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
