@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-// NIEUW: Loader2 toegevoegd aan imports
-import { MoreVertical, Send, Dumbbell, X, Check, Edit2, Mic, StopCircle, Volume2, Loader2 } from "lucide-react";
+import { MoreVertical, Send, Dumbbell, X, Check, Edit2, Mic, StopCircle, Volume2, Loader2, User } from "lucide-react";
 import type { Vak } from "./types";
 import { TutorSettings } from "./TutorSettings";
 import * as api from "../api"; 
@@ -20,12 +19,13 @@ export function ChatView({ vak }: Props) {
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  
+  // Standaard Jan, maar dit wordt snel overschreven door startSession
   const [activeTutorId, setActiveTutorId] = useState<"jan" | "sara">("jan");
   
   const inputRef = useRef<HTMLInputElement>(null);
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [showExerciseMenu, setShowExerciseMenu] = useState(false);
@@ -33,9 +33,11 @@ export function ChatView({ vak }: Props) {
   const [selectedTopic, setSelectedTopic] = useState("Present Simple");
   const [activeTheme, setActiveTheme] = useState("Algemeen");
 
+  // Ref om dubbel starten te voorkomen, maar we laten handmatig switchen wel toe
+  const initializedVak = useRef<string | null>(null);
+
   const isWritingTask = messages.length > 0 && messages[messages.length - 1].exercise?.type === 'writing';
 
-  // Automatisch scrollen bij nieuwe berichten OF als het laden begint/stopt
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   useEffect(() => scrollToBottom(), [messages, isLoading]);
 
@@ -45,32 +47,58 @@ export function ChatView({ vak }: Props) {
     }
   }, [messages, isLoading, isWritingTask]);
 
-  const playTutorAudio = async (text: string) => {
+  // AANGEPAST: Accepteert nu een overrideTutorId
+  const playTutorAudio = async (text: string, overrideTutorId?: string) => {
       try {
-          const audioBlob = await api.speakText(text, activeTutorId);
+          // Gebruik de ID die wordt meegegeven, of val terug op de state
+          const idToUse = overrideTutorId || activeTutorId;
+          
+          const audioBlob = await api.speakText(text, idToUse);
           const audio = new Audio(URL.createObjectURL(audioBlob));
           audio.play();
-      } catch (e) { console.error("Audio error (waarschijnlijk credits op)", e); }
+      } catch (e) { console.error("Audio error", e); }
   };
 
   const startSession = async (tutorId: "jan" | "sara") => {
     try {
       setIsLoading(true);
+      
+      // Update direct de UI state
+      setActiveTutorId(tutorId);
+      
       setMessages([]);
       const data = await api.createSession({ 
           topic: vak.naam, difficulty: "medium", skill: "general", tutor_id: tutorId
       });
       setSessionId(data.session_id);
-      setActiveTutorId(tutorId);
       setActiveTheme(data.state.theme || "Algemeen");
-      const welcomeText = `Hoi! Ik ben ${data.state.tutor.name}. We gaan aan de slag met ${vak.naam}.`;
+      
+      const welcomeText = `Hoi! Ik ben ${data.state.tutor.name}. Hoe kan ik je vandaag helpen?`;
       setMessages([{ id: Date.now(), type: "tutor", text: welcomeText }]);
-      playTutorAudio(welcomeText);
+      
+      // AANGEPAST: We geven 'tutorId' direct mee, omdat de state 'activeTutorId' 
+      // misschien nog niet klaar is met updaten (React is soms traag).
+      playTutorAudio(welcomeText, tutorId);
+
     } catch (error) { console.error(error); } finally { setIsLoading(false); }
   };
 
-  useEffect(() => { startSession(vak.id === 'engels' ? 'sara' : 'jan'); }, [vak.id]);
+  // Deze useEffect start de sessie automatisch als je een vak opent
+  useEffect(() => {
+    // Als we dit vak al hebben gestart, doe niks (voorkomt dubbel geluid)
+    if (initializedVak.current === vak.id) return;
+    
+    initializedVak.current = vak.id;
+    const defaultTutor = vak.id === 'engels' ? 'sara' : 'jan';
+    startSession(defaultTutor);
+  }, [vak.id]);
 
+  // Aparte functie voor als je op de knopjes klikt (forceert wissel)
+  const switchTutor = (tutorId: "jan" | "sara") => {
+      startSession(tutorId);
+  };
+
+  // ... (De rest van de functies zoals startRecording blijven hetzelfde) ...
   const startRecording = async () => {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -79,14 +107,12 @@ export function ChatView({ vak }: Props) {
         recorder.ondataavailable = (e) => chunks.push(e.data);
         recorder.onstop = async () => {
             setIsLoading(true); 
-            // We gebruiken nu het 'echte' laadsymbool, dus dit tijdelijke bericht is minder nodig,
-            // maar kan handig zijn om aan te geven dat we specifiek audio verwerken.
-            setMessages(prev => [...prev, { id: Date.now(), type: "user", text: "🎤 (Audio verwerken...)" }]);
+            setMessages(prev => [...prev, { id: Date.now(), type: "user", text: "🎤 (Verwerken...)" }]);
             try {
                 const data = await api.transcribeAudio(new Blob(chunks, { type: 'audio/webm' }));
-                setMessages(prev => prev.filter(m => m.text !== "🎤 (Audio verwerken...)"));
+                setMessages(prev => prev.filter(m => m.text !== "🎤 (Verwerken...)"));
                 if (data.text) handleSend(data.text);
-            } catch (err) { alert("Kon audio niet verstaan."); setMessages(prev => prev.filter(m => m.text !== "🎤 (Audio verwerken...)")); } finally { setIsLoading(false); }
+            } catch (err) { alert("Kon audio niet verstaan."); setMessages(prev => prev.filter(m => m.text !== "🎤 (Verwerken...)")); } finally { setIsLoading(false); }
         };
         mediaRecorderRef.current = recorder;
         recorder.start();
@@ -121,7 +147,9 @@ export function ChatView({ vak }: Props) {
             return { id: Date.now() + idx, type: msg.role === 'user' ? 'user' : 'tutor', text: msg.text || "..." };
           });
           setMessages(newMessages);
-          if (lastMsg && lastMsg.role !== 'user' && lastMsg.role !== 'exercise') playTutorAudio(lastMsg.text);
+          
+          // Ook hier geven we expliciet de activeTutorId mee
+          if (lastMsg && lastMsg.role !== 'user' && lastMsg.role !== 'exercise') playTutorAudio(lastMsg.text, activeTutorId);
       }
     } catch (error) { console.error(error); } finally { setIsLoading(false); }
   };
@@ -138,7 +166,7 @@ export function ChatView({ vak }: Props) {
           
           if(exercise.type === 'writing') {
              const intro = "Typ je antwoord gewoon in de chat, dan kijk ik het na!";
-             playTutorAudio(intro);
+             playTutorAudio(intro, activeTutorId);
           }
 
       } catch (e) {
@@ -151,7 +179,6 @@ export function ChatView({ vak }: Props) {
 
   return (
     <>
-      {/* AANGEPAST: w-full toegevoegd aan de hoofdcontainer */}
       <div className="h-full w-full flex flex-col bg-white relative">
         {/* Tutor balk */}
         <div className="border-b border-gray-100 bg-white px-6 py-4 flex items-center justify-between">
@@ -161,7 +188,23 @@ export function ChatView({ vak }: Props) {
              </div>
              <div>
                 <div className="text-gray-900 font-medium">{activeTutorId === 'jan' ? 'Meester Jan' : 'Coach Sara'}</div>
-                <div className="text-xs text-gray-500">Thema: {activeTheme}</div>
+                
+                {/* DEZE KNOPPEN ZIJN NU AANGEPAST VOOR HET SCHAKELEN */}
+                <div className="text-xs text-gray-500 flex gap-2 mt-0.5">
+                   <button 
+                        onClick={() => switchTutor('jan')} 
+                        className={`transition-colors ${activeTutorId === 'jan' ? 'font-bold text-[#5D64BE]' : 'hover:text-[#5D64BE]'}`}
+                   >
+                        Jan
+                   </button>
+                   <span className="text-gray-300">|</span>
+                   <button 
+                        onClick={() => switchTutor('sara')} 
+                        className={`transition-colors ${activeTutorId === 'sara' ? 'font-bold text-[#5D64BE]' : 'hover:text-[#5D64BE]'}`}
+                   >
+                        Sara
+                   </button>
+                </div>
              </div>
           </div>
           <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-50 rounded-lg"><MoreVertical className="w-5 h-5 text-gray-600" /></button>
@@ -184,11 +227,9 @@ export function ChatView({ vak }: Props) {
             );
           })}
 
-          {/* NIEUW: HET BEWEGENDE LAADSYMBOOL */}
           {isLoading && (
               <div className="flex justify-start w-full animate-in fade-in slide-in-from-bottom-2">
                   <div className="bg-white border border-gray-100 rounded-bl-sm rounded-2xl px-5 py-3 shadow-sm flex items-center gap-3 text-gray-500">
-                      {/* animate-spin laat het icoon draaien */}
                       <Loader2 className="w-5 h-5 animate-spin text-[#5D64BE]" />
                       <span className="text-sm italic">Aan het typen...</span>
                   </div>
